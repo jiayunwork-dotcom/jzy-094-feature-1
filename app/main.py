@@ -12,16 +12,19 @@ from fastapi.responses import JSONResponse
 
 from . import closed_form as cf
 from .critical import find_critical, find_critical_numeric
+from .multi_critical import find_critical_multi
+from .multi_source import build_river, scan_multi_profile
 from .reference import REFERENCE_INPUT, REFERENCE_N_POINTS, REFERENCE_X_MAX_KM
 from .scanning import analytic_within_window, refine_window_max, scan_profile
 from .sweep import SweepParams, sweep
 from .validation import (
     ParameterError,
     validate_model_inputs,
+    validate_multi_inputs,
     validate_sweep_bounds,
     validate_window,
 )
-from .schemas import ModelInput, ProfileRequest, SweepRequest
+from .schemas import ModelInput, MultiOutfallRequest, ProfileRequest, SweepRequest
 
 logger = logging.getLogger("sp_do_sag")
 
@@ -159,3 +162,59 @@ def sweep_endpoint(model: SweepRequest):
     base = SweepParams(**p)
     result = sweep(base, model.parameter, lo, hi, n_points)
     return {"input": p, "sweep": result}
+
+
+@app.post("/multi/critical")
+def multi_critical_endpoint(model: MultiOutfallRequest):
+    """多排污口叠加：合成总亏氧曲线，数值搜索全部局部亏氧极大。"""
+    raw_outfalls = [o.model_dump() for o in model.outfalls]
+    p = validate_multi_inputs(
+        model.d0, model.k1, model.k2, model.u, model.csat, raw_outfalls
+    )
+    t_max, x_max = validate_window(model.t_max_day, model.x_max_km)
+    if t_max is None and x_max is not None:
+        # 窗口以河程给出时先折回时间：t = x/U
+        t_max = cf.time_from_distance(x_max, p["u"])
+
+    river = build_river(
+        p["d0"],
+        p["k1"],
+        p["k2"],
+        p["u"],
+        p["csat"],
+        p["outfalls"],
+        n_submitted=p["n_submitted"],
+        n_coincident_merges=p["n_coincident_pairs"],
+    )
+    result = find_critical_multi(river, t_max)
+    points = scan_multi_profile(river, result.t_scan_max_day, model.n_points)
+
+    return {
+        "input": {
+            "d0": p["d0"],
+            "k1": p["k1"],
+            "k2": p["k2"],
+            "u": p["u"],
+            "csat": p["csat"],
+            "outfalls": [
+                {"x_km": o.x_km, "l0": o.l0} for o in model.outfalls
+            ],
+        },
+        "merged_outfalls": {
+            "strategy": "位置完全相同的排口按同位负荷相加合并为一个等效排口",
+            "n_submitted": river.n_submitted,
+            "n_merged": len(river.outfalls),
+            "n_coincident_merges": river.n_coincident_merges,
+            "outfalls": [
+                {"x_km": o.x_km, "l0": o.l0} for o in river.outfalls
+            ],
+        },
+        "window": {
+            "t_max_day": result.t_scan_max_day,
+            "x_max_km": result.x_scan_max_km,
+            "n_points": model.n_points,
+            "auto": t_max is None,
+        },
+        "critical": result.as_dict(),
+        "profile": [pt.as_dict() for pt in points],
+    }

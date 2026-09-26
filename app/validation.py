@@ -7,6 +7,10 @@ from __future__ import annotations
 import math
 from typing import Any
 
+# 多口工况允许的排污口数量上限。逐段搜索与沿程扫描对排口数是 O(N)/O(N·P)，
+# 上万已远超任何真实河段的排口密度，超过即视为明显不合理的请求。
+MAX_OUTFALLS = 10000
+
 
 class ParameterError(ValueError):
     """输入参数非法。message 可直接回给调用方。"""
@@ -118,3 +122,80 @@ def validate_sweep_bounds(
     if lov >= hiv:
         raise ParameterError(f"扫参区间要求 lo < hi，收到 lo={lo!r}, hi={hi!r}")
     return lov, hiv, n
+
+
+def validate_multi_inputs(
+    d0: Any,
+    k1: Any,
+    k2: Any,
+    u: Any,
+    csat: Any,
+    outfalls: Any,
+) -> dict:
+    """校验多排污口工况。
+
+    共用系数 k1/k2/u/csat 与本底亏氧 d0 的规则同 validate_model_inputs
+    （本工况没有「全河段统一的 L0」，每个排口自带负荷）。排污口列表：
+    - 必须是非空列表；空列表明确报错（不是静默当作零负荷）
+    - 数量不得超过 MAX_OUTFALLS
+    - 每个元素必须能取到 x_km/l0（dict 或对象属性），且均为有限数值
+    - 河程位置 >= 0（负河程无法定位在河段上）、负荷 >= 0
+    任何一项错误都必须带上下标，能定位到具体是哪个口子。
+
+    同位排口的明确策略：这里先不做合并，只统计并在返回值里报告需要合并
+    的对数；实际的「同位负荷相加」由 multi_source.build_river 执行（线性
+    叠加的直接推论），使该策略有唯一实现位置。
+    """
+    base = validate_model_inputs(d0, 0.0, k1, k2, u, csat)
+
+    if not isinstance(outfalls, list):
+        raise ParameterError(
+            f"outfalls（排污口列表）必须是数组/列表，收到 {type(outfalls).__name__}"
+        )
+    if len(outfalls) == 0:
+        raise ParameterError("outfalls（排污口列表）不能为空：至少需要一个排污口")
+    if len(outfalls) > MAX_OUTFALLS:
+        raise ParameterError(
+            f"排污口数量 {len(outfalls)} 超过上限 {MAX_OUTFALLS}，"
+            "明显不合理，请核对输入"
+        )
+
+    pairs: list[tuple[float, float]] = []
+    positions: list[float] = []
+    for idx, item in enumerate(outfalls):
+        tag = f"排污口[{idx}]"
+        if isinstance(item, dict):
+            x_raw, l_raw = item.get("x_km"), item.get("l0")
+        elif isinstance(item, (tuple, list)):
+            if len(item) != 2:
+                raise ParameterError(
+                    f"{tag} 若以数组形式给出必须恰为 [x_km, l0] 两个元素"
+                )
+            x_raw, l_raw = item
+        elif hasattr(item, "x_km") and hasattr(item, "l0"):
+            x_raw, l_raw = item.x_km, item.l0
+        else:
+            raise ParameterError(
+                f"{tag} 必须同时给出 x_km（河程位置 km）与 l0（初始碳质 BOD mg/L）"
+            )
+        xv = require_non_negative(x_raw, f"{tag} 的 x_km（河程位置 km）")
+        lv = require_non_negative(l_raw, f"{tag} 的 l0（初始碳质 BOD mg/L）")
+        pairs.append((xv, lv))
+        positions.append(xv)
+
+    # 同位（河程完全相同）排口数量统计——合并本身由 build_river 完成
+    sorted_positions = sorted(positions)
+    n_coincident = sum(
+        1 for a, b in zip(sorted_positions, sorted_positions[1:]) if a == b
+    )
+
+    return {
+        "d0": base["d0"],
+        "k1": base["k1"],
+        "k2": base["k2"],
+        "u": base["u"],
+        "csat": base["csat"],
+        "outfalls": pairs,
+        "n_submitted": len(pairs),
+        "n_coincident_pairs": n_coincident,
+    }

@@ -82,3 +82,73 @@ class SweepRequest(ModelInput):
         if isinstance(v, bool):
             raise ValueError("不接受布尔值，必须是整数")
         return v
+
+
+class OutfallInput(BaseModel):
+    """一个排污口：河程位置 x_km（>= 0）与初始碳质 BOD 负荷 l0（>= 0）。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    x_km: float = Field(..., description="排污口河程位置（自河道最上游起，公里，>= 0）")
+    l0: float = Field(..., description="该口初始碳质 BOD 负荷 mg/L（>= 0）")
+
+    @field_validator("x_km", "l0", mode="before")
+    @classmethod
+    def _reject_bool_and_non_finite(cls, v):
+        if isinstance(v, bool):
+            raise ValueError("不接受布尔值，必须是数值")
+        if isinstance(v, (int, float)) and v != v:
+            raise ValueError("不接受 NaN")
+        return v
+
+
+class MultiOutfallRequest(BaseModel):
+    """多排污口叠加工况。不继承 ModelInput：本工况没有全河段统一的 l0，
+    每个排污口各自携带初始碳质 BOD 负荷。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    d0: float = Field(..., description="来水本底亏氧 mg/L（河道最上游的初始亏氧，0~Csat）")
+    k1: float = Field(..., description="耗氧系数 /day（严格为正）")
+    k2: float = Field(..., description="复氧系数 /day（严格为正）")
+    u: float = Field(..., description="流速 km/day（严格为正）")
+    csat: float = Field(..., description="饱和溶解氧 mg/L（严格为正）")
+    outfalls: list[OutfallInput] = Field(
+        ...,
+        description=(
+            "排污口列表，每个给出 x_km/l0；至少一个。河程相同的排口按"
+            "「同位负荷相加」合并为一个等效排口"
+        ),
+    )
+    t_max_day: float | None = Field(
+        default=None, description="扫描时长（天），与 x_max_km 二选一；缺省自动包住所有峰"
+    )
+    x_max_km: float | None = Field(
+        default=None, description="扫描河程（公里，自河头起），与 t_max_day 二选一"
+    )
+    n_points: int = Field(default=1001, ge=2, le=10001, description="沿程曲线采样点数")
+
+    @field_validator("d0", "k1", "k2", "u", "csat", mode="before")
+    @classmethod
+    def _reject_bool_and_non_finite(cls, v):
+        if isinstance(v, bool):
+            raise ValueError("不接受布尔值，必须是数值")
+        if isinstance(v, (int, float)) and v != v:
+            raise ValueError("不接受 NaN")
+        return v
+
+    @field_validator("t_max_day", "x_max_km", mode="before")
+    @classmethod
+    def _reject_bool_window(cls, v):
+        if isinstance(v, bool):
+            raise ValueError("不接受布尔值，必须是数值")
+        if isinstance(v, (int, float)) and v != v:
+            raise ValueError("不接受 NaN")
+        return v
+
+    @field_validator("n_points", mode="before")
+    @classmethod
+    def _reject_bool_n_profile(cls, v):
+        if isinstance(v, bool):
+            raise ValueError("不接受布尔值，必须是整数")
+        return v
