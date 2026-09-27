@@ -44,6 +44,36 @@ def require_int(value: Any, name: str, *, minimum: int = 2) -> int:
     return value
 
 
+def validate_shared_inputs(
+    d0: Any,
+    k1: Any,
+    k2: Any,
+    u: Any,
+    csat: Any,
+) -> dict:
+    """校验单口与多口工况共用的五个输入（除负荷外的模型参数）。
+
+    k1、k2、U、Csat 必须严格为正；D0（多口工况下为来水本底亏氧）必须落在
+    [0, Csat] 内。
+    """
+    k1v = require_positive(k1, "k1（耗氧系数 /day）")
+    k2v = require_positive(k2, "k2（复氧系数 /day）")
+    uv = require_positive(u, "u（流速 km/day，1 m/s = 86.4 km/day）")
+    csatv = require_positive(csat, "csat（饱和溶解氧 mg/L）")
+    d0v = require_non_negative(d0, "d0（初始/本底亏氧 mg/L）")
+    if d0v > csatv:
+        raise ParameterError(
+            f"d0（初始/本底亏氧 {d0v}）不能超过 csat（饱和溶解氧 {csatv}）"
+        )
+    return {
+        "d0": d0v,
+        "k1": k1v,
+        "k2": k2v,
+        "u": uv,
+        "csat": csatv,
+    }
+
+
 def validate_model_inputs(
     d0: Any,
     l0: Any,
@@ -57,24 +87,71 @@ def validate_model_inputs(
     k1、k2、U、Csat 必须严格为正；L0 允许为 0（零负荷，此时没有氧垂）；
     D0 必须落在 [0, Csat] 内（亏氧不可能超过饱和值）。
     """
-    k1v = require_positive(k1, "k1（耗氧系数 /day）")
-    k2v = require_positive(k2, "k2（复氧系数 /day）")
-    uv = require_positive(u, "u（流速 km/day，1 m/s = 86.4 km/day）")
-    csatv = require_positive(csat, "csat（饱和溶解氧 mg/L）")
+    shared = validate_shared_inputs(d0, k1, k2, u, csat)
     l0v = require_non_negative(l0, "l0（初始碳质 BOD mg/L）")
-    d0v = require_non_negative(d0, "d0（初始亏氧 mg/L）")
-    if d0v > csatv:
-        raise ParameterError(
-            f"d0（初始亏氧 {d0v}）不能超过 csat（饱和溶解氧 {csatv}）"
-        )
     return {
-        "d0": d0v,
+        "d0": shared["d0"],
         "l0": l0v,
-        "k1": k1v,
-        "k2": k2v,
-        "u": uv,
-        "csat": csatv,
+        "k1": shared["k1"],
+        "k2": shared["k2"],
+        "u": shared["u"],
+        "csat": shared["csat"],
     }
+
+
+# 排污口数量的合理上限。真实河段口子以个位/十位数计，超过该上限明显是
+# 调用方构造错误，直接在计算前挡回。
+MAX_OUTFALLS = 500
+
+
+def validate_outfalls(outfalls: Any, *, max_outfalls: int = MAX_OUTFALLS) -> list[dict]:
+    """校验并规范化排污口列表，返回按河程升序、同位置已合并的规范列表。
+
+    每个口子形如 {"x_km": ..., "l0": ...}：位置必须是非负有限数，负荷必须
+    是非负有限数（允许 0，即零负荷口子，不产生贡献）。错误信息携带口子
+    序号（按提交顺序从 0 起），便于调用方定位。
+
+    完全相同位置的多个口子按「负荷相加合并为一口」的显式策略处理——叠加
+    方程对负荷是线性的，同位置两口的联合贡献与一口承担负荷之和严格相等。
+    合并时负荷先按升序再求和，保证提交顺序不影响逐位结果。
+    """
+    if isinstance(outfalls, bool) or not isinstance(outfalls, (list, tuple)):
+        raise ParameterError(f"outfalls（排污口列表）必须是数组，收到 {outfalls!r}")
+    if len(outfalls) == 0:
+        raise ParameterError("outfalls（排污口列表）不能为空，至少给出一个排污口")
+    if len(outfalls) > max_outfalls:
+        raise ParameterError(
+            f"排污口数量 {len(outfalls)} 超出合理上限 {max_outfalls}，"
+            "请先合并邻近口子或分段计算"
+        )
+
+    loads_by_position: dict[float, list[float]] = {}
+    for i, item in enumerate(outfalls):
+        if isinstance(item, dict):
+            if "x_km" not in item or "l0" not in item:
+                raise ParameterError(
+                    f"第 {i} 个排污口必须同时给出 x_km（河程位置 km）与 l0（BOD 负荷 mg/L）"
+                )
+            x_raw, l0_raw = item["x_km"], item["l0"]
+        else:  # 兼容带有同名属性的请求对象
+            x_raw = getattr(item, "x_km", None)
+            l0_raw = getattr(item, "l0", None)
+            if x_raw is None or l0_raw is None:
+                raise ParameterError(
+                    f"第 {i} 个排污口必须同时给出 x_km（河程位置 km）与 l0（BOD 负荷 mg/L）"
+                )
+        xv = require_non_negative(x_raw, f"第 {i} 个排污口的 x_km（河程位置 km）")
+        lv = require_non_negative(l0_raw, f"第 {i} 个排污口的 l0（初始碳质 BOD mg/L）")
+        loads_by_position.setdefault(xv, []).append(lv)
+
+    merged: list[dict] = []
+    for x_km in sorted(loads_by_position):
+        loads = sorted(loads_by_position[x_km])
+        total = 0.0
+        for load in loads:
+            total += load
+        merged.append({"x_km": x_km, "l0": total, "n_merged": len(loads)})
+    return merged
 
 
 def validate_window(

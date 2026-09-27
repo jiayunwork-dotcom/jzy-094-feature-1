@@ -55,6 +55,45 @@ def bisect_root(
     return (lo + hi) / 2.0
 
 
+def bisect_root_to_float_precision(
+    f: Callable[[float], float],
+    a: float,
+    b: float,
+    *,
+    max_iter: int = 200,
+) -> float:
+    """二分求根直到浮点相邻：返回跨越根的那对相邻浮点的中点。
+
+    与 bisect_root 的容差停机不同，这里一直细分到 (lo, hi) 成为相邻浮点。
+    只要括号内函数只有一次符号变化，结果就是由函数唯一确定的浮点，
+    与初始括号无关——多口叠加搜索靠这一点保证：下游新增口子不会改变
+    上游已定位峰值的逐位结果。
+    """
+    fa, fb = f(a), f(b)
+    if fa == 0.0:
+        return a
+    if fb == 0.0:
+        return b
+    if fa * fb > 0.0:
+        raise ValueError("二分求根需要两端函数值异号")
+
+    lo, hi = a, b
+    flo = fa
+    for _ in range(max_iter):
+        mid = (lo + hi) / 2.0
+        if mid == lo or mid == hi:
+            # 浮点已相邻，中点即根的最佳浮点表示
+            return mid
+        fm = f(mid)
+        if fm == 0.0:
+            return mid
+        if flo * fm < 0.0:
+            hi = mid
+        else:
+            lo, flo = mid, fm
+    return (lo + hi) / 2.0
+
+
 def golden_section_max(
     f: Callable[[float], float],
     a: float,

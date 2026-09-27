@@ -12,16 +12,20 @@ from fastapi.responses import JSONResponse
 
 from . import closed_form as cf
 from .critical import find_critical, find_critical_numeric
+from .multi_critical import find_all_peaks
+from .multi_profile import prepare_outfalls, scan_multi_profile
 from .reference import REFERENCE_INPUT, REFERENCE_N_POINTS, REFERENCE_X_MAX_KM
 from .scanning import analytic_within_window, refine_window_max, scan_profile
 from .sweep import SweepParams, sweep
 from .validation import (
     ParameterError,
     validate_model_inputs,
+    validate_outfalls,
+    validate_shared_inputs,
     validate_sweep_bounds,
     validate_window,
 )
-from .schemas import ModelInput, ProfileRequest, SweepRequest
+from .schemas import ModelInput, MultiProfileRequest, ProfileRequest, SweepRequest
 
 logger = logging.getLogger("sp_do_sag")
 
@@ -53,8 +57,9 @@ app = FastAPI(
     version="1.0.0",
     description=(
         "沿排污口下游扫描亏氧曲线、定位溶解氧最低点（临界点），"
-        "支持 k1/k2/L0/D0/U 区间批量扫参。时间单位天、河程单位公里、"
-        "流速 km/day，t = x/U。"
+        "支持 k1/k2/L0/D0/U 区间批量扫参，以及多排污口叠加工况"
+        "（/multi/profile：各口贡献线性叠加，数值搜索全部局部亏氧峰）。"
+        "时间单位天、河程单位公里、流速 km/day，t = x/U。"
     ),
     lifespan=lifespan,
 )
@@ -159,3 +164,58 @@ def sweep_endpoint(model: SweepRequest):
     base = SweepParams(**p)
     result = sweep(base, model.parameter, lo, hi, n_points)
     return {"input": p, "sweep": result}
+
+
+@app.post("/multi/profile")
+def multi_profile_endpoint(model: MultiProfileRequest):
+    """多排污口叠加工况：合成沿程亏氧曲线，并数值搜索全部局部亏氧峰。"""
+    shared = validate_shared_inputs(model.d0, model.k1, model.k2, model.u, model.csat)
+    canonical = validate_outfalls(
+        [{"x_km": o.x_km, "l0": o.l0} for o in model.outfalls]
+    )
+    t_max, x_max = validate_window(model.t_max_day, model.x_max_km)
+
+    outfalls = prepare_outfalls(canonical, shared["u"])
+
+    # 临界点搜索始终覆盖自动推算的全程上界，与曲线展示窗口无关
+    mc = find_all_peaks(
+        shared["d0"], outfalls, shared["k1"], shared["k2"], shared["u"], shared["csat"]
+    )
+
+    # 展示窗口缺省时用搜索上界（覆盖全部峰与衰减尾部）
+    if t_max is None:
+        if x_max is None:
+            t_max = mc.t_end_day
+        else:
+            t_max = cf.time_from_distance(x_max, shared["u"])
+
+    points = scan_multi_profile(
+        shared["d0"], outfalls, shared["k1"], shared["k2"], shared["u"], shared["csat"],
+        t_max, model.n_points,
+    )
+
+    return {
+        "input": {
+            **shared,
+            "outfalls": [
+                {
+                    "index": i,
+                    "x_km": o.x_km,
+                    "t_day": o.t_day,
+                    "l0": o.l0,
+                    "n_merged": item["n_merged"],
+                }
+                for i, (o, item) in enumerate(zip(outfalls, canonical))
+            ],
+            "n_outfalls_submitted": len(model.outfalls),
+            "n_outfalls": len(outfalls),
+            "merge_strategy": "相同河程位置的排污口按负荷相加合并为一口",
+        },
+        "window": {
+            "t_max_day": t_max,
+            "x_max_km": cf.distance_from_time(t_max, shared["u"]),
+            "n_points": model.n_points,
+        },
+        "critical": mc.as_dict(),
+        "profile": [pt.as_dict() for pt in points],
+    }

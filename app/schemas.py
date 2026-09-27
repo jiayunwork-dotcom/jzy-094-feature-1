@@ -82,3 +82,59 @@ class SweepRequest(ModelInput):
         if isinstance(v, bool):
             raise ValueError("不接受布尔值，必须是整数")
         return v
+
+
+class OutfallInput(BaseModel):
+    """单个排污口：河程位置 + 初始碳质 BOD 负荷。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    x_km: float = Field(..., description="排污口河程位置 km（>= 0，自河道最上游起算）")
+    l0: float = Field(..., description="该口初始碳质 BOD 负荷 mg/L（>= 0）")
+
+    @field_validator("x_km", "l0", mode="before")
+    @classmethod
+    def _reject_bool_and_non_finite(cls, v):
+        if isinstance(v, bool):
+            raise ValueError("不接受布尔值，必须是数值")
+        if isinstance(v, (int, float)) and v != v:  # NaN 自比较
+            raise ValueError("不接受 NaN")
+        return v
+
+
+class MultiProfileRequest(BaseModel):
+    """多排污口叠加工况：共用系数 + 排污口列表 + 可选扫描窗口。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    d0: float = Field(..., description="来水本底亏氧 mg/L（河道最上游初始亏氧）")
+    k1: float = Field(..., description="耗氧系数 /day（取值域由 validation 层校验：严格为正）")
+    k2: float = Field(..., description="复氧系数 /day（取值域由 validation 层校验：严格为正）")
+    u: float = Field(..., description="流速 km/day（1 m/s = 86.4 km/day，严格为正）")
+    csat: float = Field(..., description="饱和溶解氧 mg/L（严格为正）")
+    outfalls: list[OutfallInput] = Field(
+        ..., description="排污口列表（顺序无关；相同位置按负荷相加合并）"
+    )
+    t_max_day: float | None = Field(
+        default=None, description="扫描时长（天），与 x_max_km 二选一，严格为正"
+    )
+    x_max_km: float | None = Field(
+        default=None, description="扫描河程（公里），与 t_max_day 二选一，严格为正"
+    )
+    n_points: int = Field(default=401, ge=2, le=10001, description="扫描采样点数")
+
+    @field_validator("d0", "k1", "k2", "u", "csat", "t_max_day", "x_max_km", mode="before")
+    @classmethod
+    def _reject_bool_and_non_finite(cls, v):
+        if isinstance(v, bool):
+            raise ValueError("不接受布尔值，必须是数值")
+        if isinstance(v, (int, float)) and v != v:  # NaN 自比较
+            raise ValueError("不接受 NaN")
+        return v
+
+    @field_validator("n_points", mode="before")
+    @classmethod
+    def _reject_bool_n(cls, v):
+        if isinstance(v, bool):
+            raise ValueError("不接受布尔值，必须是整数")
+        return v
